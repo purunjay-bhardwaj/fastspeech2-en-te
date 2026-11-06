@@ -1,0 +1,116 @@
+# ============================================================
+# FastSpeech 2 — English (Svarah Dataset) Configuration
+# ============================================================
+
+# ── Dataset ─────────────────────────────────────────────────
+dataset: "svarah"
+language: "english"
+raw_data_dir: "data/raw/english"
+preprocessed_data_dir: "data/preprocessed/english"
+train_filelist: "data/preprocessed/english/train.txt"
+val_filelist:   "data/preprocessed/english/val.txt"
+
+# ── Audio ────────────────────────────────────────────────────
+audio:
+  sampling_rate: 22050
+  max_wav_value: 32768.0
+  hop_length: 256
+  win_length: 1024
+  n_fft: 1024
+  n_mels: 80
+  fmin: 0
+  fmax: 8000
+  min_duration: 1.0        # seconds
+  max_duration: 10.0       # seconds
+
+# ── Text / Phoneme ───────────────────────────────────────────
+text:
+  language: "en-us"
+  phonemizer: "espeak"     # backend for phonemizer lib
+  cleaners: ["english_cleaners"]
+  pad_symbol: "_"
+  bos_symbol: "^"
+  eos_symbol: "$"
+
+# ── Variance Adaptor ────────────────────────────────────────
+variance:
+  pitch_normalization: true
+  energy_normalization: true
+  pitch_feature: "phoneme_level"    # frame_level | phoneme_level
+  energy_feature: "phoneme_level"
+  pitch_n_bins: 256
+  energy_n_bins: 256
+
+# ── Model Architecture ───────────────────────────────────────
+model:
+  encoder_layer: 4
+  encoder_head: 2
+  encoder_hidden: 256
+  encoder_dropout: 0.2
+  encoder_kernel_size: 9
+
+  decoder_layer: 4
+  decoder_head: 2
+  decoder_hidden: 256
+  decoder_dropout: 0.2
+  decoder_kernel_size: 9
+
+  fft_conv1d_filter_size: 1024
+  fft_conv1d_kernel_size: [9, 1]
+
+  duration_predictor_filter_size: 256
+  duration_predictor_kernel_size: 3
+  duration_predictor_dropout: 0.5
+
+  pitch_predictor_filter_size: 256
+  pitch_predictor_kernel_size: 3
+  pitch_predictor_dropout: 0.5
+
+  energy_predictor_filter_size: 256
+  energy_predictor_kernel_size: 3
+  energy_predictor_dropout: 0.5
+
+  max_seq_len: 1000
+
+# ── Training ─────────────────────────────────────────────────
+training:
+  batch_size: 16
+  total_steps: 150000
+  log_step: 100
+  save_step: 5000
+  val_step: 1000
+  optimizer: "adam"
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-6
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  grad_clip_thresh: 1.0
+  warm_up_step: 4000
+  anneal_steps: [300000, 400000, 500000]
+  anneal_rate: 0.3
+
+  loss_weights:
+    mel_loss: 1.0
+    postnet_loss: 1.0
+    duration_loss: 1.0
+    pitch_loss: 1.0
+    energy_loss: 1.0
+
+# ── MFA (Montreal Forced Aligner) ───────────────────────────
+mfa:
+  acoustic_model: "english_us_arpa"
+  dictionary: "english_us_arpa"
+  num_jobs: 4
+
+# ── Vocoder ──────────────────────────────────────────────────
+vocoder:
+  type: "hifigan"              # used for inference
+  checkpoint: "pretrained/hifigan_universal_v1"
+
+# ── Paths ────────────────────────────────────────────────────
+paths:
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  output_dir: "../Results/English"
+  plots_dir: "../Results/English/variance_adaptor_plots"
+  audio_dir: "../Results/English/test_generated_audios"
