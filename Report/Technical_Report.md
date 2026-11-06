@@ -89,8 +89,8 @@ At inference, durations are predicted by the duration predictor as `exp(d) - 1` 
 | Sampling rate | Resampled to 22,050 Hz |
 | Training split | 5 hours |
 | Validation split | 1 hour |
-| Phoneme set | English ARPAbet (via espeak-ng) |
-| Alignment | MFA with `english_us_arpa` acoustic model |
+| Phoneme set | IPA with stress marks (espeak-ng via phonemizer, word-by-word) |
+| Alignment | MFA acoustic model trained on the corpus with the espeak-generated dictionary (`mfa train`) |
 
 Svarah contains read English sentences spoken by native speakers of 12 Indian languages, introducing diverse phonetic variation not present in standard LJSpeech-trained models.
 
@@ -133,7 +133,7 @@ Globally normalised with training-set mean and standard deviation for stability.
 
 ### 4.3 Telugu Grapheme-to-Phoneme (G2P)
 
-Telugu presents a unique challenge: it uses an **abugida** script (Brahmic family) where consonants carry an inherent /a/ vowel, suppressed by the virama (్). The custom G2P implemented in `prep_dataset.py` processes characters according to these rules:
+Telugu presents a unique challenge: it uses an **abugida** script (Brahmic family) where consonants carry an inherent /a/ vowel, suppressed by the virama (్). The custom G2P implemented in `preprocess.py` processes characters according to these rules:
 
 1. **Consonant + Matra** → consonant phoneme + matra vowel phoneme
 2. **Consonant + Virama** → consonant phoneme only (no inherent vowel)
@@ -151,7 +151,7 @@ The resulting phoneme set has ~52 symbols covering all Telugu vowels (స్వ�
 | Hyperparameter | Value |
 |----------------|-------|
 | Optimizer | Adam |
-| Learning rate | 1e-3 (Noam decay) |
+| Learning rate | Noam schedule, peak ≈ 1e-3 at step 4,000 (d_model^-0.5 · warm_up^-0.5) |
 | Warm-up steps | 4,000 |
 | Batch size | 16 |
 | Total steps | 150,000 |
@@ -229,7 +229,7 @@ The energy predictor correctly assigns lower energy to Telugu utterance-final sy
 fastspeech2_project/
 ├── English/
 │   ├── config.yaml           # English training config
-│   ├── prep_dataset.py       # Svarah download + preprocessing
+│   ├── preprocess.py       # Svarah download + preprocessing
 │   ├── model.py              # FastSpeech 2 architecture
 │   ├── train.py              # Training loop
 │   ├── inference.py          # Synthesis + variance output dump
@@ -237,7 +237,7 @@ fastspeech2_project/
 │   └── checkpoints/          # Saved model weights
 ├── Telugu/
 │   ├── config.yaml           # Telugu training config
-│   ├── prep_dataset.py       # IndicTTS + Telugu G2P
+│   ├── preprocess.py       # IndicTTS + Telugu G2P
 │   ├── model.py              # (same architecture)
 │   ├── train.py
 │   ├── inference.py
@@ -272,11 +272,11 @@ pip install -r requirements.txt --break-system-packages
 cd English/
 
 # 1. Download & preprocess (downloads Svarah via HuggingFace)
-python prep_dataset.py --config config.yaml
+python preprocess.py --config config.yaml
 
 # 2. (Optional) Run MFA alignment for accurate durations
 #    conda install -c conda-forge montreal-forced-aligner
-python prep_dataset.py --config config.yaml --mfa_align --skip_download
+python preprocess.py --config config.yaml --mfa_align --skip_download
 
 # 3. Train
 python train.py --config config.yaml
@@ -292,7 +292,7 @@ python plot_variance.py --config config.yaml
 cd ../Telugu/
 
 # Same steps, same commands
-python prep_dataset.py --config config.yaml
+python preprocess.py --config config.yaml
 python train.py --config config.yaml
 python inference.py --config config.yaml \
     --checkpoint checkpoints/checkpoint_150000.pt

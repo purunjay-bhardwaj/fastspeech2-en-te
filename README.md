@@ -13,16 +13,17 @@ Non-autoregressive Text-to-Speech using FastSpeech 2 for two languages:
 fastspeech2_project/
 ├── English/
 │   ├── config.yaml           # Hyperparameters & paths
-│   ├── prep_dataset.py       # Download Svarah + MFA preprocessing
+│   ├── preprocess.py         # Download Svarah + MFA preprocessing
+│   ├── features.py           # Shared feature/alignment helpers
 │   ├── model.py              # FastSpeech 2 architecture (PyTorch)
 │   ├── train.py              # Training loop (Noam LR + checkpointing)
-│   ├── inference.py          # Synthesis for 10 test sentences
+│   ├── inference.py          # Synthesis for the 5 assignment test sentences
 │   ├── plot_variance.py      # Variance adaptor plots (duration/pitch/energy)
 │   └── checkpoints/          # (populated after training)
 │
 ├── Telugu/
 │   ├── config.yaml           # Telugu-specific config
-│   ├── prep_dataset.py       # IndicTTS + custom Telugu G2P
+│   ├── preprocess.py       # IndicTTS + custom Telugu G2P
 │   ├── model.py              # Same architecture
 │   ├── train.py
 │   ├── inference.py
@@ -30,12 +31,15 @@ fastspeech2_project/
 │
 ├── Results/
 │   ├── English/
-│   │   ├── test_generated_audios/        ← .wav files for 10 test sentences
+│   │   ├── training_loss.png             ← written by train.py
+│   │   ├── validation_loss.png
+│   │   ├── test_generated_audios/        ← E1, E2a, E2b, E3, E4 .wav
 │   │   └── variance_adaptor_plots/
 │   │       ├── duration/                 ← bar charts per sentence
 │   │       ├── pitch/                    ← line plots per sentence
 │   │       ├── energy/                   ← area plots per sentence
 │   │       └── summary/                  ← 3-panel combined plot per sentence
+│   │   (variance_adaptor_data/           ← raw predictions JSON + mels)
 │   └── Telugu/
 │       └── (same structure)
 │
@@ -51,8 +55,15 @@ fastspeech2_project/
 ```bash
 pip install -r requirements.txt --break-system-packages
 
+# espeak-ng (backend for the English phonemizer)
+brew install espeak-ng          # macOS  (Linux: apt-get install espeak-ng)
+
 # MFA (for forced alignment — improves duration quality significantly)
 conda install -c conda-forge montreal-forced-aligner
+
+# (Optional) HiFi-GAN vocoder — otherwise Griffin-Lim is used.
+# Put generator checkpoint + config.json + models.py + env.py from
+# https://github.com/jik876/hifi-gan in <Lang>/pretrained/hifigan/
 ```
 
 Python ≥ 3.9 | PyTorch ≥ 2.0 | CUDA recommended
@@ -67,17 +78,19 @@ Python ≥ 3.9 | PyTorch ≥ 2.0 | CUDA recommended
 cd English/
 
 # Step 1: Download Svarah + extract features
-python prep_dataset.py --config config.yaml
+python preprocess.py --config config.yaml
 
-# Step 2: (Optional) MFA alignment for accurate durations
-python prep_dataset.py --config config.yaml --mfa_align --skip_download
+# Step 2: (Recommended) MFA alignment for real phoneme durations.
+# Trains MFA on the corpus with our own G2P dictionary, then re-extracts features.
+# Without it, durations are spread uniformly across phonemes.
+python preprocess.py --config config.yaml --mfa_align --skip_download
 
 # Step 3: Train
 python train.py --config config.yaml
 
-# Step 4: Generate speech for 10 test sentences
+# Step 4: Generate speech for the test sentences (E1, E2a, E2b, E3, E4)
 python inference.py --config config.yaml \
-    --checkpoint checkpoints/checkpoint_150000.pt
+    --checkpoint checkpoints/model_final_fp16.pt
 
 # Step 5: Plot duration / pitch / energy for each sentence
 python plot_variance.py --config config.yaml
@@ -88,12 +101,23 @@ python plot_variance.py --config config.yaml
 ```bash
 cd Telugu/
 # Same commands — the config and G2P handle the language differences
-python prep_dataset.py --config config.yaml
+python preprocess.py --config config.yaml
+python preprocess.py --config config.yaml --mfa_align --skip_download
 python train.py --config config.yaml
 python inference.py --config config.yaml \
-    --checkpoint checkpoints/checkpoint_150000.pt
+    --checkpoint checkpoints/model_final_fp16.pt
 python plot_variance.py --config config.yaml
 ```
+
+Training writes `logs/train_loss.csv` / `logs/val_loss.csv` and redraws
+`Results/<Lang>/training_loss.png` and `validation_loss.png` at every validation step
+(`python train.py --config config.yaml --plot_only` redraws them from the logs).
+At the end it exports `checkpoints/model_final_fp16.pt` (~60 MB, weights only — under
+GitHub's 100 MB limit); the full `checkpoint_<step>.pt` files (~350 MB, with optimizer
+state) are for resuming and should not be committed.
+
+`model.py`, `train.py`, `inference.py`, `features.py` and `plot_variance.py` are
+identical in both folders — keep them in sync when editing.
 
 ---
 
@@ -108,7 +132,7 @@ Phoneme IDs
     ▼
 [Encoder — 4× FFT Blocks]
     │
-    ├──► Duration Predictor ──► Length Regulator
+    ├──► Duration Predictor ──► (durations for LR)
     │
     ├──► Pitch Predictor  ──► Quantise ──► Embedding ──► Add
     │
@@ -137,7 +161,7 @@ Each FFT Block: Multi-Head Self-Attention → LayerNorm → Conv1D(k=9) → ReLU
 
 ## Telugu G2P
 
-Telugu uses a Brahmic abugida script. The custom G2P in `Telugu/prep_dataset.py` handles:
+Telugu uses a Brahmic abugida script. The custom G2P in `Telugu/preprocess.py` handles:
 
 | Script feature | Rule |
 |---------------|------|
@@ -145,10 +169,10 @@ Telugu uses a Brahmic abugida script. The custom G2P in `Telugu/prep_dataset.py`
 | Consonant + matra | C + ◌ → `c matra_vowel` |
 | Consonant + virama (్) | C + ◌ → `c` (no vowel) |
 | Independent vowel | V → `v` |
-| Anusvara (ం) | → `M` |
+| Anusvara (ం) | → `M` (after the vowel, e.g. కం → `k a M`) |
 | Visarga (ః) | → `H` |
 
-52-token phoneme set, automatically written to `text/phoneme_set_telugu.txt`.
+Phoneme set, automatically written to `text/phoneme_set_telugu.txt`.
 
 ---
 

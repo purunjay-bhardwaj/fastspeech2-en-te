@@ -32,61 +32,44 @@ from model import FastSpeech2
 
 # ── Test Sentences ───────────────────────────────────────────────────────────
 
+# Test sentences from the assignment brief — text preserved exactly as provided
+# (including the deliberate "rhyth m" and "అడ విలో" splits).
 ENGLISH_TEST_SENTENCES = [
-    "The quick brown fox jumps over the lazy dog.",
-    "Speech synthesis has advanced remarkably in recent years.",
-    "Deep learning models can now produce natural sounding voices.",
-    "FastSpeech two generates mel spectrograms in parallel.",
-    "The variance adaptor controls pitch duration and energy.",
-    "Natural language processing enables machines to understand speech.",
-    "She sells sea shells by the sea shore.",
-    "How much wood would a woodchuck chuck if a woodchuck could chuck wood.",
-    "To be or not to be, that is the question.",
-    "Artificial intelligence is transforming the world of technology.",
+    ("E1",  "The antidisestablishmentarianism movement gained considerable momentum "
+            "during the parliamentary proceedings."),
+    ("E2a", "The orchestra's conduct during the ceremony was praised by the audience."),
+    ("E2b", "The researchers will conduct an experiment to evaluate the proposed method."),
+    ("E3",  "The rhyth m of the orchestra changed unexpectedly."),
+    ("E4",  "The meeting will start at 10:45 AM on 12 November 2026, so andaroo should "
+            "arrive on time."),
 ]
 
 TELUGU_TEST_SENTENCES = [
-    "నేను తెలుగు మాట్లాడతాను.",                        # I speak Telugu.
-    "మీరు ఎలా ఉన్నారు?",                               # How are you?
-    "ఈ నగరం చాలా అందంగా ఉంది.",                        # This city is very beautiful.
-    "మీ పేరు ఏమిటి?",                                   # What is your name?
-    "అతను పుస్తకం చదువుతున్నాడు.",                      # He is reading a book.
-    "ఆకాశం నీలంగా ఉంది.",                               # The sky is blue.
-    "సంగీతం ఆత్మకు పోషణ.",                              # Music is nourishment for the soul.
-    "జ్ఞానం అన్నింటికంటే గొప్ప సంపద.",                 # Knowledge is the greatest wealth.
-    "ఈ రోజు వాతావరణం చాలా బాగుంది.",                   # The weather is very nice today.
-    "కృత్రిమ మేధస్సు భవిష్యత్తును మారుస్తోంది.",        # AI is changing the future.
+    ("T1",  "న్యూరోఫార్మకోలాజికల్ పరిశోధనలో నూతన ఔషధాల ప్రభావాన్ని విశ్లేషించారు."),
+    ("T2a", "తాడుపై అతని పట్టు చాలా బలంగా ఉంది."),
+    ("T2b", "ఆమె పట్టు చీరను ధరించి వేడుకకు వచ్చింది."),
+    ("T3",  "పులి అడ విలో నిశ్శబ్దంగా నడిచింది."),
+    ("T4",  "ఈ సమావేశం 2026 నవంబర్ 12వ తేదీ ఉదయం 10:45 గంటలకు ప్రారంభమవుతుంది, "
+            "సమయానికి సిద్ధంగా ఉంచండి."),
 ]
 
 
 # ── Text Processing ───────────────────────────────────────────────────────────
 
-def get_english_phonemes(text: str) -> str:
-    """Convert English text to phoneme string using phonemizer."""
-    try:
-        import phonemizer
-        backend = phonemizer.backend.EspeakBackend(
-            language="en-us", preserve_punctuation=False, with_stress=True
-        )
-        result = backend.phonemize(
-            [text],
-            separator=phonemizer.separator.Separator(phone=" ", word="|", syllable="")
-        )[0]
-        return " ".join(result.replace("|", " ").split())
-    except Exception as e:
-        print(f"Phonemizer warning: {e} — using character fallback")
-        return text.lower()
-
-
-def get_telugu_phonemes(text: str) -> str:
-    """Convert Telugu text to phoneme string."""
-    # Import the G2P from prep_dataset in the Telugu folder
+def load_text_frontend(lang: str):
+    """
+    Return `text_to_phones` from the language's preprocess.py, so inference uses
+    exactly the same G2P that produced the training phonemes / MFA dictionary.
+    """
+    import importlib.util
     import sys
-    tel_dir = Path(__file__).parent.parent / "Telugu"
-    if str(tel_dir) not in sys.path:
-        sys.path.insert(0, str(tel_dir))
-    from prep_dataset import telugu_g2p, telugu_cleaners
-    return telugu_g2p(telugu_cleaners(text))
+    folder = Path(__file__).resolve().parent.parent / ("Telugu" if lang == "telugu" else "English")
+    if str(folder) not in sys.path:
+        sys.path.insert(0, str(folder))
+    spec = importlib.util.spec_from_file_location(f"preprocess_{lang}", folder / "preprocess.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.text_to_phones
 
 
 # ── HiFi-GAN Vocoder ─────────────────────────────────────────────────────────
@@ -94,7 +77,8 @@ def get_telugu_phonemes(text: str) -> str:
 def load_hifigan(checkpoint_path: str, device: torch.device):
     """
     Load HiFi-GAN generator from a checkpoint.
-    Falls back to Griffin-Lim if checkpoint not found.
+    Expects the jik876/hifi-gan code (models.py, env.py) and config.json in the
+    same folder as the generator checkpoint. Falls back to Griffin-Lim otherwise.
     """
     if not Path(checkpoint_path).exists():
         print(f"HiFi-GAN checkpoint not found at {checkpoint_path}. "
@@ -121,12 +105,13 @@ def load_hifigan(checkpoint_path: str, device: torch.device):
         return None
 
 
-def mel_to_wav_griffinlim(mel_db: np.ndarray, cfg: dict) -> np.ndarray:
-    """Convert mel-spectrogram to waveform using Griffin-Lim."""
+def mel_to_wav_griffinlim(log_mel: np.ndarray, cfg: dict) -> np.ndarray:
+    """Convert a natural-log magnitude mel-spectrogram to waveform using Griffin-Lim."""
     ac   = cfg["audio"]
-    mel  = librosa.db_to_power(mel_db)
+    mel  = np.exp(log_mel)
     wav  = librosa.feature.inverse.mel_to_audio(
         mel,
+        power=1.0,
         sr=ac["sampling_rate"],
         n_fft=ac["n_fft"],
         hop_length=ac["hop_length"],
@@ -148,19 +133,22 @@ def load_config(path: str) -> dict:
 def load_vocab(vocab_path: str = "text/phoneme_vocab.json") -> dict:
     p = Path(vocab_path)
     if p.exists():
-        return json.loads(p.read_text())
-    # Build minimal vocab on the fly
+        return json.loads(p.read_text(encoding="utf-8"))
     return {}
 
 
-def phones_to_ids(phones: str, vocab: dict) -> torch.LongTensor:
-    ids = [vocab.get(p, 0) for p in phones.split()]
-    return torch.LongTensor(ids).unsqueeze(0)   # (1, T)
+def phones_to_ids(phones: list, vocab: dict):
+    """Map phones to ids, dropping (and reporting) phones unseen in training."""
+    known   = [p for p in phones if p in vocab]
+    unknown = sorted({p for p in phones if p not in vocab})
+    if unknown:
+        print(f"    ⚠ dropping phones not in training vocab: {unknown}")
+    return known, torch.LongTensor([vocab[p] for p in known]).unsqueeze(0)   # (1, T)
 
 
 def synthesize(model, src_ids: torch.Tensor, cfg: dict, device: torch.device,
                p_control: float = 1.0, e_control: float = 1.0,
-               d_control: float = 1.0):
+               d_control: float = 1.0, speaker_id: int = 0):
     """Run model inference and return outputs."""
     model.eval()
     with torch.no_grad():
@@ -170,11 +158,14 @@ def synthesize(model, src_ids: torch.Tensor, cfg: dict, device: torch.device,
          mel_len, _) = model(
             src_ids,
             p_control=p_control, e_control=e_control, d_control=d_control,
+            speakers=torch.LongTensor([speaker_id]).to(device),
         )
     return {
         "mel_before":  mel_before[0].cpu().numpy(),   # (T, n_mels)
         "mel_after":   mel_after[0].cpu().numpy(),
-        "duration":    torch.exp(dur_pred[0]).cpu().numpy() - 1,  # (T_phone,)
+        # frames actually used by the length regulator (same rounding as model.py)
+        "duration":    torch.round((torch.exp(dur_pred[0]) - 1) * d_control)
+                            .clamp(min=0).cpu().numpy(),             # (T_phone,)
         "pitch":       pitch_pred[0].cpu().numpy(),
         "energy":      energy_pred[0].cpu().numpy(),
         "mel_len":     mel_len[0].item(),
@@ -193,6 +184,9 @@ def main():
                         help="Energy control multiplier")
     parser.add_argument("--d_control",  type=float, default=1.0,
                         help="Duration control multiplier")
+    parser.add_argument("--speaker",    default=None,
+                        help="Speaker name from text/speakers.json "
+                             "(default: the speaker with the most training data)")
     args = parser.parse_args()
 
     cfg    = load_config(args.config)
@@ -203,12 +197,27 @@ def main():
     # Load model
     vocab = load_vocab()
     if not vocab:
-        raise RuntimeError("phoneme_vocab.json not found. Run prep_dataset.py first.")
+        raise RuntimeError("phoneme_vocab.json not found. Run preprocess.py first.")
+
+    get_phones = load_text_frontend(lang)
 
     vocab_size = len(vocab)
-    model = FastSpeech2(cfg, vocab_size).to(device)
     state = torch.load(args.checkpoint, map_location=device)
+    n_speakers = (state["model"]["speaker_emb.weight"].shape[0]
+                  if "speaker_emb.weight" in state["model"] else 1)
+    model = FastSpeech2(cfg, vocab_size, n_speakers).to(device)
     model.load_state_dict(state["model"])
+
+    spk_path = Path("text/speakers.json")
+    speakers = json.loads(spk_path.read_text(encoding="utf-8")) if spk_path.exists() else {}
+    if args.speaker is not None:
+        if args.speaker not in speakers:
+            raise ValueError(f"Unknown speaker {args.speaker!r}; options: {list(speakers)[:20]}")
+        speaker_id = speakers[args.speaker]
+    else:
+        speaker_id = 0
+    spk_name = next((k for k, v in speakers.items() if v == speaker_id), "default")
+    print(f"Speaker: {spk_name} (id {speaker_id} of {n_speakers})")
     model.eval()
     print(f"Loaded model from {args.checkpoint} (step {state.get('step', '?')})")
 
@@ -219,30 +228,31 @@ def main():
     audio_dir = Path(cfg["paths"]["audio_dir"])
     audio_dir.mkdir(parents=True, exist_ok=True)
     var_dir   = Path(cfg["paths"]["plots_dir"]).parent / "variance_adaptor_data"
+    mel_dir   = var_dir / "mels"
+    mel_dir.mkdir(parents=True, exist_ok=True)
     var_dir.mkdir(parents=True, exist_ok=True)
 
     # Test sentences
     sentences = TELUGU_TEST_SENTENCES if lang == "telugu" else ENGLISH_TEST_SENTENCES
-    get_phones = get_telugu_phonemes if lang == "telugu" else get_english_phonemes
 
     all_variance_data = []
 
     print(f"\nSynthesizing {len(sentences)} test sentences...")
-    for i, sentence in enumerate(sentences):
-        print(f"  [{i+1:02d}/{len(sentences)}] {sentence[:60]}...")
+    for i, (sid, sentence) in enumerate(sentences):
+        print(f"  [{i+1}/{len(sentences)}] {sid}: {sentence}")
 
         # Text → phonemes → ids
-        phones = get_phones(sentence)
-        if not phones.strip():
-            print(f"    ⚠ Empty phoneme string, skipping.")
+        phones, src_ids = phones_to_ids(get_phones(sentence), vocab)
+        print(f"    phones: {' '.join(phones)}")
+        if not phones:
+            print(f"    ⚠ Empty phoneme sequence, skipping.")
             continue
-        src_ids = phones_to_ids(phones, vocab)
 
         # Inference
         out = synthesize(model, src_ids, cfg, device,
-                         args.p_control, args.e_control, args.d_control)
+                         args.p_control, args.e_control, args.d_control, speaker_id)
 
-        mel = out["mel_after"].T    # (n_mels, T) for librosa
+        mel = out["mel_after"][:out["mel_len"]].T    # (n_mels, T) log-mel
 
         # Waveform
         if hifigan is not None:
@@ -253,22 +263,23 @@ def main():
             wav = mel_to_wav_griffinlim(mel, cfg)
 
         # Save audio
-        wav_path = audio_dir / f"sentence_{i+1:02d}.wav"
-        sf.write(str(wav_path), wav, cfg["audio"]["sampling_rate"])
+        wav_path = audio_dir / f"{sid}.wav"
+        sf.write(str(wav_path), np.clip(wav, -1.0, 1.0), cfg["audio"]["sampling_rate"])
 
         # Save mel
-        mel_path = audio_dir / f"sentence_{i+1:02d}_mel.npy"
+        mel_path = mel_dir / f"{sid}_mel.npy"
         np.save(mel_path, out["mel_after"])
 
         # Store variance data for plotting
         var_data = {
-            "sentence_id":  i + 1,
+            "sentence_id":  sid,
             "text":         sentence,
-            "phones":       phones.split(),
+            "phones":       phones,
             "duration":     out["duration"].tolist(),
             "pitch":        out["pitch"].tolist(),
             "energy":       out["energy"].tolist(),
             "mel_len":      out["mel_len"],
+            "speaker":      spk_name,
         }
         all_variance_data.append(var_data)
         print(f"    ✓ Saved: {wav_path.name}  (mel_len={out['mel_len']})")

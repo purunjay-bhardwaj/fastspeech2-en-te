@@ -1,0 +1,9 @@
+# Raw / preprocessed datasets (large; regenerate with preprocess.py)
+*/data/
+# Full training checkpoints with optimizer state (~350 MB) — commit model_final_fp16.pt instead
+*/checkpoints/checkpoint_*.pt
+# MFA / Python / OS
+*/pretrained/
+__pycache__/
+.venv/
+.DS_Store

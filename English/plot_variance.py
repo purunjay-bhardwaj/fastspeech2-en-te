@@ -6,10 +6,10 @@ Reads the JSON produced by inference.py.
 
 Output structure:
     Results/<Language>/variance_adaptor_plots/
-        duration/   sentence_01_duration.png  ...
-        pitch/      sentence_01_pitch.png     ...
-        energy/     sentence_01_energy.png    ...
-        summary/    sentence_01_all.png       ...
+        duration/   E1_duration.png  ...
+        pitch/      E1_pitch.png     ...
+        energy/     E1_energy.png    ...
+        summary/    E1_all.png       ...
 
 Usage:
     python plot_variance.py --config config.yaml
@@ -90,7 +90,7 @@ def phone_tick_labels(phones: list, max_ticks: int = 20) -> tuple:
 # ── Individual Plot Functions ─────────────────────────────────────────────────
 
 def plot_duration(phones: list, durations: list, out_path: Path,
-                  sentence_id: int, text: str) -> None:
+                  sentence_id: str, text: str) -> None:
     """Bar chart of predicted phoneme durations."""
     n   = len(phones)
     fig, ax = plt.subplots(figsize=(max(10, n * 0.35), 4))
@@ -112,7 +112,7 @@ def plot_duration(phones: list, durations: list, out_path: Path,
     ax.set_xticklabels(phones, rotation=45, ha="right", fontsize=8)
     ax.set_xlabel("Phoneme")
     ax.set_ylabel("Predicted Duration (frames)")
-    ax.set_title(f"Sentence {sentence_id} — Duration Predictor\n{wrap_title(text)}")
+    ax.set_title(f"{sentence_id} — Duration Predictor\n{wrap_title(text)}")
     ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
     ax.grid(axis="y", color=PALETTE["grid"], linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
@@ -123,7 +123,7 @@ def plot_duration(phones: list, durations: list, out_path: Path,
 
 
 def plot_pitch(phones: list, pitch: list, out_path: Path,
-               sentence_id: int, text: str) -> None:
+               sentence_id: str, text: str) -> None:
     """Line plot of predicted phoneme-level pitch (F0)."""
     n = len(phones)
     fig, ax = plt.subplots(figsize=(max(10, n * 0.35), 4))
@@ -143,7 +143,7 @@ def plot_pitch(phones: list, pitch: list, out_path: Path,
     ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
     ax.set_xlabel("Phoneme")
     ax.set_ylabel("Predicted Pitch (normalized)")
-    ax.set_title(f"Sentence {sentence_id} — Pitch Predictor\n{wrap_title(text)}")
+    ax.set_title(f"{sentence_id} — Pitch Predictor\n{wrap_title(text)}")
     ax.grid(color=PALETTE["grid"], linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
 
@@ -153,7 +153,7 @@ def plot_pitch(phones: list, pitch: list, out_path: Path,
 
 
 def plot_energy(phones: list, energy: list, out_path: Path,
-                sentence_id: int, text: str) -> None:
+                sentence_id: str, text: str) -> None:
     """Filled area plot of predicted phoneme-level energy."""
     n = len(phones)
     fig, ax = plt.subplots(figsize=(max(10, n * 0.35), 4))
@@ -173,7 +173,7 @@ def plot_energy(phones: list, energy: list, out_path: Path,
     ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
     ax.set_xlabel("Phoneme")
     ax.set_ylabel("Predicted Energy (normalized)")
-    ax.set_title(f"Sentence {sentence_id} — Energy Predictor\n{wrap_title(text)}")
+    ax.set_title(f"{sentence_id} — Energy Predictor\n{wrap_title(text)}")
     ax.grid(color=PALETTE["grid"], linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
 
@@ -183,12 +183,12 @@ def plot_energy(phones: list, energy: list, out_path: Path,
 
 
 def plot_all_three(phones: list, durations: list, pitch: list, energy: list,
-                   out_path: Path, sentence_id: int, text: str) -> None:
+                   out_path: Path, sentence_id: str, text: str) -> None:
     """3-row summary figure: duration, pitch, energy for one sentence."""
     n = len(phones)
     fig, axes = plt.subplots(3, 1, figsize=(max(12, n * 0.4), 11), sharex=True)
     fig.suptitle(
-        f"Variance Adaptor Outputs — Sentence {sentence_id}\n{wrap_title(text, 70)}",
+        f"Variance Adaptor Outputs — {sentence_id}\n{wrap_title(text, 70)}",
         fontsize=13, fontweight="bold", color=PALETTE["text"]
     )
     fig.patch.set_facecolor("white")
@@ -322,16 +322,16 @@ def main():
         pitch   = item["pitch"]
         energy  = item["energy"]
 
-        print(f"  Plotting sentence {sid:02d}: {text[:50]}...")
+        print(f"  Plotting {sid}: {text[:50]}...")
 
         plot_duration(phones, dur,
-                      dur_dir / f"sentence_{sid:02d}_duration.png", sid, text)
+                      dur_dir / f"{sid}_duration.png", sid, text)
         plot_pitch(phones, pitch,
-                   pit_dir / f"sentence_{sid:02d}_pitch.png", sid, text)
+                   pit_dir / f"{sid}_pitch.png", sid, text)
         plot_energy(phones, energy,
-                    eng_dir / f"sentence_{sid:02d}_energy.png", sid, text)
+                    eng_dir / f"{sid}_energy.png", sid, text)
         plot_all_three(phones, dur, pitch, energy,
-                       summary_dir / f"sentence_{sid:02d}_all.png", sid, text)
+                       summary_dir / f"{sid}_all.png", sid, text)
 
     # Aggregate distribution
     plot_aggregate_distributions(all_data, summary_dir, language)

@@ -26,17 +26,30 @@ class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000, dropout: float = 0.1):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-        pe = torch.zeros(max_len, d_model)
+        self.d_model = d_model
+        # not saved in state_dict, so it can be grown for long utterances
+        self.register_buffer("pe", self._build(max_len), persistent=False)
+
+    def _build(self, max_len: int) -> torch.Tensor:
+        pe = torch.zeros(max_len, self.d_model)
         pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        div = torch.exp(torch.arange(0, self.d_model, 2).float()
+                        * (-math.log(10000.0) / self.d_model))
         pe[:, 0::2] = torch.sin(pos * div)
         pe[:, 1::2] = torch.cos(pos * div)
-        pe = pe.unsqueeze(0)   # (1, max_len, d_model)
-        self.register_buffer("pe", pe)
+        return pe.unsqueeze(0)   # (1, max_len, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.pe[:, :x.size(1), :]
+        if x.size(1) > self.pe.size(1):
+            self.pe = self._build(2 * x.size(1)).to(self.pe.device)
+        x = x + self.pe[:, :x.size(1), :].to(x.dtype)
         return self.dropout(x)
+
+
+def get_mask_from_lengths(lengths: torch.Tensor, max_len: int) -> torch.Tensor:
+    """True = padding."""
+    ids = torch.arange(max_len, device=lengths.device).unsqueeze(0)
+    return ids >= lengths.unsqueeze(1)
 
 
 # ── Multi-Head Self-Attention ─────────────────────────────────────────────────
@@ -122,16 +135,6 @@ class VariancePredictor(nn.Module):
                  dropout: float = 0.5):
         super().__init__()
         pad = (kernel_size - 1) // 2
-        self.layers = nn.Sequential(
-            nn.Conv1d(d_model, d_inner, kernel_size, padding=pad),
-            nn.ReLU(),
-            nn.LayerNorm(d_inner),   # applied after transpose
-            nn.Dropout(dropout),
-            nn.Conv1d(d_inner, d_inner, kernel_size, padding=pad),
-            nn.ReLU(),
-            nn.LayerNorm(d_inner),
-            nn.Dropout(dropout),
-        )
         self.linear = nn.Linear(d_inner, 1)
         self.d_inner = d_inner
         self.conv1 = nn.Sequential(
@@ -147,13 +150,17 @@ class VariancePredictor(nn.Module):
         )
         self.ln2   = nn.LayerNorm(d_inner)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor,
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         # x: (B, T, d_model)
         out = self.conv1(x.transpose(1, 2)).transpose(1, 2)
         out = self.ln1(out)
         out = self.conv2(out.transpose(1, 2)).transpose(1, 2)
         out = self.ln2(out)
-        return self.linear(out).squeeze(-1)   # (B, T)
+        out = self.linear(out).squeeze(-1)    # (B, T)
+        if mask is not None:
+            out = out.masked_fill(mask, 0.0)
+        return out
 
 
 # ── Length Regulator ──────────────────────────────────────────────────────────
@@ -185,11 +192,13 @@ class LengthRegulator(nn.Module):
 
         # pad to max length in batch
         max_len = max(mel_lengths) if target_len is None else target_len
+        max_len = max(max_len, 1)
         out = torch.zeros(B, max_len, x.size(-1), device=x.device, dtype=x.dtype)
         for i, e in enumerate(expanded_list):
             L = min(e.size(0), max_len)
             out[i, :L] = e[:L]
 
+        mel_lengths = [min(l, max_len) for l in mel_lengths]
         return out, torch.tensor(mel_lengths, device=x.device)
 
 
@@ -232,7 +241,7 @@ class VarianceAdaptor(nn.Module):
         self.energy_embedding = nn.Embedding(cfg["variance"]["energy_n_bins"], d)
 
         self.register_buffer("pitch_bins",  torch.linspace(-5, 5, n_bins - 1))
-        self.register_buffer("energy_bins", torch.linspace(0,  5, n_bins - 1))
+        self.register_buffer("energy_bins", torch.linspace(-5, 5, cfg["variance"]["energy_n_bins"] - 1))
 
     def _quantise(self, values: torch.Tensor, bins: torch.Tensor) -> torch.Tensor:
         return torch.bucketize(values, bins)
@@ -251,26 +260,36 @@ class VarianceAdaptor(nn.Module):
         """
         Returns: (output, duration_pred, pitch_pred, energy_pred, mel_len, mel_mask)
         """
-        dur_pred   = self.duration_predictor(x)
-        pitch_pred = self.pitch_predictor(x)
-        enrg_pred  = self.energy_predictor(x)
+        dur_pred   = self.duration_predictor(x, src_mask)
+        pitch_pred = self.pitch_predictor(x, src_mask)
+        enrg_pred  = self.energy_predictor(x, src_mask)
 
-        if duration_target is not None:   # training
-            # use GT durations for LR
-            x, mel_len = self.length_regulator(x, duration_target)
-            # use GT pitch/energy
-            pitch_q  = self._quantise(pitch_target,  self.pitch_bins)
+        # Phoneme-level pitch / energy embeddings (GT in training, predicted at inference)
+        if pitch_target is not None:
+            pitch_q = self._quantise(pitch_target, self.pitch_bins)
+        else:
+            pitch_q = self._quantise(pitch_pred * p_control, self.pitch_bins)
+        if energy_target is not None:
             energy_q = self._quantise(energy_target, self.energy_bins)
-        else:                             # inference
-            dur_rounded = (torch.exp(dur_pred) - 1).clamp(min=0)
-            dur_rounded = (dur_rounded * d_control + 0.5).long()
-            x, mel_len  = self.length_regulator(x, dur_rounded)
-            # use predicted pitch/energy
-            pitch_q  = self._quantise(pitch_pred  * p_control, self.pitch_bins)
-            energy_q = self._quantise(enrg_pred   * e_control, self.energy_bins)
+        else:
+            energy_q = self._quantise(enrg_pred * e_control, self.energy_bins)
+        x = x + self.pitch_embedding(pitch_q) + self.energy_embedding(energy_q)
 
-        x = x + self.pitch_embedding(pitch_q)
-        x = x + self.energy_embedding(energy_q)
+        # Length regulation (phonemes → mel frames)
+        if duration_target is not None:   # training: GT durations
+            max_len = mel_mask.size(1) if mel_mask is not None else None
+            x, mel_len = self.length_regulator(x, duration_target, max_len)
+        else:                             # inference: predicted durations
+            dur_rounded = torch.round((torch.exp(dur_pred) - 1) * d_control).clamp(min=0).long()
+            if src_mask is not None:
+                dur_rounded = dur_rounded.masked_fill(src_mask, 0)
+            # guarantee at least one frame per utterance
+            empty = dur_rounded.sum(dim=1, keepdim=True) == 0
+            dur_rounded = torch.where(empty, torch.ones_like(dur_rounded), dur_rounded)
+            x, mel_len = self.length_regulator(x, dur_rounded)
+
+        if mel_mask is None:
+            mel_mask = get_mask_from_lengths(mel_len, x.size(1))
 
         return x, dur_pred, pitch_pred, enrg_pred, mel_len, mel_mask
 
@@ -311,7 +330,7 @@ class FastSpeech2(nn.Module):
     Output: mel-spectrogram    (B, T_mel, n_mels) + variance predictions
     """
 
-    def __init__(self, cfg: dict, vocab_size: int):
+    def __init__(self, cfg: dict, vocab_size: int, n_speakers: int = 1):
         super().__init__()
         m   = cfg["model"]
         d   = m["encoder_hidden"]
@@ -327,6 +346,10 @@ class FastSpeech2(nn.Module):
             FFTBlock(d, m["encoder_head"], ff, ks, m["encoder_dropout"])
             for _ in range(m["encoder_layer"])
         ])
+
+        # Multi-speaker datasets (Svarah: 117 speakers, IndicTTS-Te: 2): a learned
+        # speaker embedding is added to the encoder output, as in ming024/FastSpeech2.
+        self.speaker_emb = nn.Embedding(n_speakers, d) if n_speakers > 1 else None
 
         self.variance_adaptor = VarianceAdaptor(cfg)
 
@@ -348,6 +371,7 @@ class FastSpeech2(nn.Module):
                 p_control: float = 1.0,
                 e_control: float = 1.0,
                 d_control: float = 1.0,
+                speakers: Optional[torch.Tensor] = None,
                 ):
         """
         Returns:
@@ -364,6 +388,11 @@ class FastSpeech2(nn.Module):
         x = self.pos_enc(x)
         for layer in self.encoder:
             x = layer(x, src_mask)
+
+        if self.speaker_emb is not None:
+            if speakers is None:
+                speakers = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+            x = x + self.speaker_emb(speakers).unsqueeze(1)
 
         # Variance Adaptor
         (x, dur_pred, pitch_pred, energy_pred,

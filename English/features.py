@@ -23,6 +23,7 @@ from tqdm import tqdm
 SIL_PHONES = {"", "sil", "sp", "spn", "<eps>"}
 SPECIAL_TOKENS = ["_", "^", "$", "sp"]   # "_" = padding → id 0
 VOCAB_PATH = Path("text/phoneme_vocab.json")
+SPEAKERS_PATH = Path("text/speakers.json")
 
 Entry = Tuple[str, str, str, str]       # (speaker, uid, wav_path, text)
 
@@ -191,7 +192,7 @@ def write_mfa_dictionary(lexicon: Dict[str, List[str]], dict_path: Path) -> None
 
 
 def run_mfa_train(corpus_dir: Path, dict_path: Path, textgrid_dir: Path,
-                  model_out: Path, num_jobs: int = 4) -> None:
+                  model_out: Path, num_jobs: int = 4) -> bool:
     """
     Train an acoustic model on our own corpus + dictionary and export alignments.
     Using our own dictionary guarantees TextGrid phones == the G2P phones used at
@@ -202,7 +203,14 @@ def run_mfa_train(corpus_dir: Path, dict_path: Path, textgrid_dir: Path,
            "--output_directory", str(textgrid_dir),
            "--num_jobs", str(num_jobs), "--clean"]
     print("Running MFA:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # Don't lose the whole preprocessing run: fall back to uniform durations.
+        print(f"⚠ MFA failed ({e}). Continuing WITHOUT alignments — durations will be "
+              f"uniform. Fix MFA and re-run with --mfa_align --skip_download.")
+        return False
 
 
 # ── Entries / split ──────────────────────────────────────────────────────────
@@ -326,3 +334,23 @@ def write_vocab(phones: Sequence[str], path: Path = VOCAB_PATH) -> Dict[str, int
     path.write_text(json.dumps(vocab, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Vocabulary ({len(vocab)} symbols) → {path}")
     return vocab
+
+
+def write_speakers(train_entries: Sequence[Entry], path: Path = SPEAKERS_PATH) -> Dict[str, int]:
+    """Speaker → id map, ordered by amount of training data (id 0 = largest speaker)."""
+    from collections import Counter
+    counts = Counter(e[0] for e in train_entries)
+    speakers = {spk: i for i, (spk, _) in enumerate(counts.most_common())}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(speakers, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"Speakers ({len(speakers)}) → {path}  (most data: {next(iter(speakers), None)})")
+    return speakers
+
+
+def find_column(sample: dict, candidates: Sequence[str]) -> Optional[str]:
+    """First matching column name in a HF sample (case-insensitive)."""
+    lower = {k.lower(): k for k in sample.keys()}
+    for c in candidates:
+        if c.lower() in lower:
+            return lower[c.lower()]
+    return None
